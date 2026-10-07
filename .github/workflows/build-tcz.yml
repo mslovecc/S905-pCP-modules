@@ -4,612 +4,210 @@ on:
   workflow_dispatch:
     inputs:
       source_release:
-        description: "S905-pCP-kernels release tag"
-        required: true
+        description: "Release tag of S905-pCP-kernels"
+        required: false
         default: "v0.4.2"
-
       bundle_asset:
         description: "Release bundle asset"
-        required: true
+        required: false
         default: "6.12.67.tar.gz"
-
       kernel_release:
-        description: "Kernel release directory inside modules archive"
-        required: true
+        description: "Kernel release name"
+        required: false
         default: "6.12.112-pcp-n1"
-
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
 
 env:
   SOURCE_REPO: mslovecc/S905-pCP-kernels
-  SOURCE_RELEASE: v0.4.2
-  BUNDLE_ASSET: 6.12.67.tar.gz
-  KERNEL_RELEASE: 6.12.112-pcp-n1
+  DEFAULT_SOURCE_RELEASE: v0.4.2
+  DEFAULT_BUNDLE_ASSET: 6.12.67.tar.gz
+  DEFAULT_KERNEL_RELEASE: 6.12.112-pcp-n1
 
 jobs:
   build:
     runs-on: ubuntu-24.04
-
     steps:
-
-      # ------------------------------------------------------------
-      # 1. Checkout
-      # ------------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
-
-      # ------------------------------------------------------------
-      # 2. Install build dependencies
-      # ------------------------------------------------------------
       - name: Install dependencies
         shell: bash
         run: |
-          set -Eeuo pipefail
-
+          set -euxo pipefail
           sudo apt-get update
+          sudo apt-get install -y curl ca-certificates xz-utils gzip file squashfs-tools coreutils findutils
 
-          sudo apt-get install -y \
-            squashfs-tools \
-            xz-utils \
-            gzip \
-            tar \
-            file \
-            coreutils
-
-          echo "== tool versions =="
-
-          mksquashfs -version || true
-          unsquashfs -version || true
-          xz --version | head -1
-          tar --version | head -1
-
-
-      # ------------------------------------------------------------
-      # 3. Resolve variables
-      # ------------------------------------------------------------
       - name: Resolve variables
         id: vars
         shell: bash
+        env:
+          INPUT_SOURCE_RELEASE: ${{ inputs.source_release }}
+          INPUT_BUNDLE_ASSET: ${{ inputs.bundle_asset }}
+          INPUT_KERNEL_RELEASE: ${{ inputs.kernel_release }}
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
+          SOURCE_RELEASE="${INPUT_SOURCE_RELEASE:-$DEFAULT_SOURCE_RELEASE}"
+          BUNDLE_ASSET="${INPUT_BUNDLE_ASSET:-$DEFAULT_BUNDLE_ASSET}"
+          KERNEL_RELEASE="${INPUT_KERNEL_RELEASE:-$DEFAULT_KERNEL_RELEASE}"
+          echo "SOURCE_RELEASE=$SOURCE_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "BUNDLE_ASSET=$BUNDLE_ASSET" >> "$GITHUB_OUTPUT"
+          echo "KERNEL_RELEASE=$KERNEL_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "SOURCE_RELEASE=$SOURCE_RELEASE"
+          echo "BUNDLE_ASSET=$BUNDLE_ASSET"
+          echo "KERNEL_RELEASE=$KERNEL_RELEASE"
 
-          SOURCE_REPO="${{ github.event.inputs.source_release != '' && '' || '' }}"
-
-          if [ -n "${{ github.event.inputs.source_release }}" ]; then
-            SOURCE_RELEASE="${{ github.event.inputs.source_release }}"
-          else
-            SOURCE_RELEASE="${SOURCE_RELEASE}"
-          fi
-
-          if [ -n "${{ github.event.inputs.bundle_asset }}" ]; then
-            BUNDLE_ASSET="${{ github.event.inputs.bundle_asset }}"
-          else
-            BUNDLE_ASSET="${BUNDLE_ASSET}"
-          fi
-
-          if [ -n "${{ github.event.inputs.kernel_release }}" ]; then
-            KVER="${{ github.event.inputs.kernel_release }}"
-          else
-            KVER="${KERNEL_RELEASE}"
-          fi
-
-          echo "source_release=${SOURCE_RELEASE}"
-          echo "bundle_asset=${BUNDLE_ASSET}"
-          echo "kernel_release=${KVER}"
-
-          echo "source_release=${SOURCE_RELEASE}" >> "$GITHUB_OUTPUT"
-          echo "bundle_asset=${BUNDLE_ASSET}" >> "$GITHUB_OUTPUT"
-          echo "kver=${KVER}" >> "$GITHUB_OUTPUT"
-
-
-      # ------------------------------------------------------------
-      # 4. Download ophub kernel release bundle
-      # ------------------------------------------------------------
-      - name: Download source release bundle
+      - name: Download kernel release bundle
         shell: bash
         env:
-          SOURCE_RELEASE: ${{ steps.vars.outputs.source_release }}
-          BUNDLE_ASSET: ${{ steps.vars.outputs.bundle_asset }}
+          SOURCE_RELEASE: ${{ steps.vars.outputs.SOURCE_RELEASE }}
+          BUNDLE_ASSET: ${{ steps.vars.outputs.BUNDLE_ASSET }}
         run: |
-          set -Eeuo pipefail
-
+          set -euxo pipefail
           URL="https://github.com/${SOURCE_REPO}/releases/download/${SOURCE_RELEASE}/${BUNDLE_ASSET}"
+          curl -fL --retry 5 --retry-delay 3 "$URL" -o source-release.tar.gz
+          ls -lh source-release.tar.gz
+          file source-release.tar.gz
 
-          echo "Downloading:"
-          echo "${URL}"
-
-          curl \
-            --fail \
-            --location \
-            --retry 5 \
-            --retry-delay 3 \
-            --output source-bundle.tar.gz \
-            "${URL}"
-
-          echo "Downloaded:"
-          ls -lh source-bundle.tar.gz
-
-          file source-bundle.tar.gz
-
-          test -s source-bundle.tar.gz
-
-
-      # ------------------------------------------------------------
-      # 5. Extract release bundle
-      # ------------------------------------------------------------
       - name: Extract release bundle
         shell: bash
-        env:
-          KVER: ${{ steps.vars.outputs.kver }}
         run: |
-          set -Eeuo pipefail
+          set -euxo pipefail
+          rm -rf source-release
+          mkdir -p source-release
+          tar -xzf source-release.tar.gz -C source-release
+          find source-release -maxdepth 4 -type f -printf '%p %s bytes\n' | sort
 
-          rm -rf source-release modules-tree
-          mkdir -p source-release modules-tree
-
-          echo "== extracting release bundle =="
-
-          tar -xzf source-bundle.tar.gz \
-            -C source-release
-
-          echo "== release bundle contents =="
-
-          find source-release \
-            -maxdepth 3 \
-            -type f \
-            -printf '%p\n' \
-            | sort
-
-
-      # ------------------------------------------------------------
-      # 6. Locate and extract module archive
-      # ------------------------------------------------------------
-      - name: Extract kernel modules
+      - name: Locate module archive
+        id: locate
         shell: bash
         env:
-          KVER: ${{ steps.vars.outputs.kver }}
+          KERNEL_RELEASE: ${{ steps.vars.outputs.KERNEL_RELEASE }}
         run: |
-          set -Eeuo pipefail
-
-          echo "== locate module archive =="
-
-          mapfile -t MODULE_MATCHES < <(
-            find source-release \
-              -type f \
-              -name "modules-${KVER}.tar.gz" \
-              -print
-          )
-
-          echo "Matching archives: ${#MODULE_MATCHES[@]}"
-
-          if [ "${#MODULE_MATCHES[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one modules-${KVER}.tar.gz"
-
-            echo "Available module archives:"
-            find source-release \
-              -type f \
-              -name 'modules-*.tar.gz' \
-              -print \
-              | sort
-
+          set -euo pipefail
+          MODULE_ARCHIVE=""
+          while IFS= read -r candidate; do
+            if [ "$(basename "$candidate")" = "modules-${KERNEL_RELEASE}.tar.gz" ]; then
+              MODULE_ARCHIVE="$candidate"
+              break
+            fi
+          done < <(find source-release -type f -name "modules-${KERNEL_RELEASE}.tar.gz" -print)
+          if [ -z "$MODULE_ARCHIVE" ]; then
+            echo "ERROR: modules archive not found"
+            find source-release -type f -name 'modules-*.tar.gz' -print | sort
             exit 1
           fi
+          echo "MODULE_ARCHIVE=$MODULE_ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "Using module archive: $MODULE_ARCHIVE"
 
-          MODULE_TAR="${MODULE_MATCHES[0]}"
-
-          echo "Using module archive:"
-          echo "${MODULE_TAR}"
-
-          echo "== module archive information =="
-
-          ls -lh "${MODULE_TAR}"
-          file "${MODULE_TAR}"
-
-          echo "== extracting module archive =="
-
-          rm -rf modules-tree
-          mkdir -p modules-tree
-
-          tar -xzf "${MODULE_TAR}" \
-            -C modules-tree
-
-          echo "== raw module tree =="
-
-          find modules-tree \
-            -maxdepth 3 \
-            -type d \
-            -print \
-            | sort
-
-
-          # ----------------------------------------------------------
-          # IMPORTANT:
-          #
-          # Actual archive layout:
-          #
-          # modules-tree/
-          # └── 6.12.112-pcp-n1/
-          #     ├── kernel/
-          #     ├── modules.dep
-          #     ├── modules.alias
-          #     └── ...
-          #
-          # TCZ builder expects:
-          #
-          # modules-tree/
-          # ├── kernel/
-          # ├── modules.dep
-          # ├── modules.alias
-          # └── ...
-          #
-          # Normalize the extra KVER directory layer.
-          # ----------------------------------------------------------
-
-          if [ ! -d "modules-tree/kernel" ] \
-             && [ -d "modules-tree/${KVER}/kernel" ]; then
-
-            echo "== normalizing module tree =="
-
-            echo "Removing outer directory:"
-            echo "modules-tree/${KVER}/"
-
-            mv \
-              "modules-tree/${KVER}" \
-              modules-tree-normalized
-
-            rm -rf modules-tree
-
-            mv \
-              modules-tree-normalized \
-              modules-tree
-          fi
-
-
-          # ----------------------------------------------------------
-          # Verify normalized structure
-          # ----------------------------------------------------------
-
-          echo "== normalized module tree =="
-
-          find modules-tree \
-            -maxdepth 2 \
-            -type d \
-            -print \
-            | sort
-
-          echo "== module tree top-level =="
-
-          ls -lah modules-tree
-
-
-          test -d "modules-tree/kernel"
-
-          test -f "modules-tree/modules.dep"
-
-          test -f "modules-tree/modules.alias"
-
-          echo "Module tree layout OK."
-
-
-          # ----------------------------------------------------------
-          # Count modules
-          # ----------------------------------------------------------
-
-          KO_COUNT="$(
-            find modules-tree \
-              -type f \
-              -name '*.ko*' \
-              | wc -l
-          )"
-
-          echo "KO_COUNT=${KO_COUNT}"
-
-          test "${KO_COUNT}" -ge 100
-
-
-      # ------------------------------------------------------------
-      # 7. Build TCZ
-      # ------------------------------------------------------------
-      - name: Build TCZ filesystem
+      - name: Extract module archive
         shell: bash
         env:
-          KVER: ${{ steps.vars.outputs.kver }}
+          MODULE_ARCHIVE: ${{ steps.locate.outputs.MODULE_ARCHIVE }}
         run: |
-          set -Eeuo pipefail
+          set -euxo pipefail
+          rm -rf modules-tree
+          mkdir -p modules-tree
+          tar -xzf "$MODULE_ARCHIVE" -C modules-tree
+          find modules-tree -maxdepth 3 -type d -print | sort
+
+      - name: Normalize module tree
+        shell: bash
+        env:
+          KERNEL_RELEASE: ${{ steps.vars.outputs.KERNEL_RELEASE }}
+        run: |
+          set -euo pipefail
+          if [ ! -d "modules-tree/kernel" ] && [ -d "modules-tree/${KERNEL_RELEASE}/kernel" ]; then
+            mv "modules-tree/${KERNEL_RELEASE}" modules-tree-normalized
+            rm -rf modules-tree
+            mv modules-tree-normalized modules-tree
+          fi
+          find modules-tree -maxdepth 2 -type d -print | sort
+          test -d "modules-tree/kernel"
+          test -f "modules-tree/modules.dep"
+          test -f "modules-tree/modules.alias"
+          echo "Module tree layout OK."
+
+      - name: Validate module tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          du -sh modules-tree
+          KO_COUNT="$(find modules-tree/kernel -type f \( -name '*.ko' -o -name '*.ko.gz' -o -name '*.ko.xz' -o -name '*.ko.zst' \) | wc -l)"
+          echo "KO_COUNT=$KO_COUNT"
+          test "$KO_COUNT" -ge 100
+          ls -lh modules-tree/modules.dep modules-tree/modules.alias modules-tree/modules.order modules-tree/modules.builtin modules-tree/modules.symbols
+
+      - name: Prepare TCZ filesystem
+        shell: bash
+        env:
+          KERNEL_RELEASE: ${{ steps.vars.outputs.KERNEL_RELEASE }}
+        run: |
+          set -euxo pipefail
+          EXT="N1-KERNEL-${KERNEL_RELEASE}"
+          DST="tcz-root/usr/local/lib/modules/${KERNEL_RELEASE}"
+          rm -rf tcz-root "$EXT.tcz" "$EXT.tcz.md5"
+          mkdir -p "$DST"
+          cp -a modules-tree/kernel "$DST/"
+          cp -a modules-tree/modules.* "$DST/"
+          find tcz-root/usr/local/lib/modules -maxdepth 3 -type d -print | sort
+          find "$DST/kernel" -type f \( -name '*.ko' -o -name '*.ko.gz' -o -name '*.ko.xz' -o -name '*.ko.zst' \) | wc -l
+
+      - name: Build TCZ
+        shell: bash
+        env:
+          KERNEL_RELEASE: ${{ steps.vars.outputs.KERNEL_RELEASE }}
+        run: |
+          set -euxo pipefail
+          EXT="N1-KERNEL-${KERNEL_RELEASE}"
+          mksquashfs tcz-root "${EXT}.tcz" -noappend -no-xattrs -comp xz -b 131072
+          ls -lh "${EXT}.tcz"
+          file "${EXT}.tcz"
 
-          EXT="N1-KERNEL-${KVER}"
-
-          SRC="modules-tree"
-
-          DST="tcz-root/usr/local/lib/modules/${KVER}"
-
-
-          echo "== environment =="
-
-          pwd
-
-          df -h .
-
-          du -sh "${SRC}"
-
-          echo "Source top-level:"
-
-          ls -lah "${SRC}"
-
-
-          # ----------------------------------------------------------
-          # Prepare TCZ root
-          # ----------------------------------------------------------
-
-          echo "== prepare destination =="
-
-          rm -rf tcz-root
-
-          mkdir -p "${DST}"
-
-          echo "Destination:"
-          echo "${DST}"
-
-
-          # ----------------------------------------------------------
-          # Verify source
-          # ----------------------------------------------------------
-
-          echo "== source checks =="
-
-          test -d "${SRC}"
-
-          test -d "${SRC}/kernel"
-
-          test -f "${SRC}/modules.dep"
-
-          test -f "${SRC}/modules.alias"
-
-          echo "source checks OK"
-
-
-          # ----------------------------------------------------------
-          # Copy kernel modules
-          # ----------------------------------------------------------
-
-          echo "== copy kernel directory =="
-
-          cp -a \
-            "${SRC}/kernel" \
-            "${DST}/"
-
-          echo "kernel copy OK"
-
-          du -sh "${DST}/kernel"
-
-
-          # ----------------------------------------------------------
-          # Copy module indexes
-          # ----------------------------------------------------------
-
-          echo "== copy module indexes =="
-
-          for f in \
-            modules.alias \
-            modules.alias.bin \
-            modules.builtin \
-            modules.builtin.alias.bin \
-            modules.builtin.bin \
-            modules.builtin.modinfo \
-            modules.dep \
-            modules.dep.bin \
-            modules.devname \
-            modules.order \
-            modules.softdep \
-            modules.symbols \
-            modules.symbols.bin \
-            modules.weakdep
-          do
-
-            test -f "${SRC}/${f}"
-
-            cp -a \
-              "${SRC}/${f}" \
-              "${DST}/"
-
-            echo "copied ${f}"
-
-          done
-
-
-          # ----------------------------------------------------------
-          # Destination verification
-          # ----------------------------------------------------------
-
-          echo "== destination checks =="
-
-          test -d "${DST}/kernel"
-
-          test -f "${DST}/modules.dep"
-
-          test -f "${DST}/modules.alias"
-
-          echo "destination checks OK"
-
-
-          # ----------------------------------------------------------
-          # Count final module files
-          # ----------------------------------------------------------
-
-          echo "== module count =="
-
-          KO_COUNT="$(
-            find "${DST}/kernel" \
-              -type f \
-              -name '*.ko*' \
-              | wc -l
-          )"
-
-          echo "KO_COUNT=${KO_COUNT}"
-
-          test "${KO_COUNT}" -ge 100
-
-
-          # ----------------------------------------------------------
-          # Size / disk check
-          # ----------------------------------------------------------
-
-          echo "== TCZ root size =="
-
-          du -sh tcz-root
-
-          echo "== free space =="
-
-          df -h .
-
-
-          # ----------------------------------------------------------
-          # Build SquashFS
-          # ----------------------------------------------------------
-
-          echo "== mksquashfs =="
-
-          mksquashfs \
-            tcz-root \
-            "${EXT}.tcz" \
-            -noappend \
-            -no-xattrs \
-            -comp xz \
-            -b 131072
-
-
-          test -s "${EXT}.tcz"
-
-
-          # ----------------------------------------------------------
-          # Checksums
-          # ----------------------------------------------------------
-
-          echo "== checksums =="
-
-          md5sum \
-            "${EXT}.tcz" \
-            > "${EXT}.tcz.md5.txt"
-
-          sha256sum \
-            "${EXT}.tcz" \
-            > "${EXT}.tcz.sha256"
-
-
-          # ----------------------------------------------------------
-          # Manifest
-          # ----------------------------------------------------------
-
-          echo "== manifest =="
-
-          unsquashfs \
-            -ll \
-            "${EXT}.tcz" \
-            > "${EXT}.manifest.txt"
-
-          test -s "${EXT}.manifest.txt"
-
-
-          # ----------------------------------------------------------
-          # Final output
-          # ----------------------------------------------------------
-
-          echo "== final files =="
-
-          ls -lh \
-            "${EXT}.tcz" \
-            "${EXT}.tcz.md5.txt" \
-            "${EXT}.tcz.sha256" \
-            "${EXT}.manifest.txt"
-
-
-      # ------------------------------------------------------------
-      # 8. Validate TCZ
-      # ------------------------------------------------------------
       - name: Validate TCZ
         shell: bash
         env:
-          KVER: ${{ steps.vars.outputs.kver }}
+          KERNEL_RELEASE: ${{ steps.vars.outputs.KERNEL_RELEASE }}
         run: |
-          set -Eeuo pipefail
-
-          EXT="N1-KERNEL-${KVER}"
-
-          echo "== TCZ validation =="
-
-          test -s "${EXT}.tcz"
-
-          test -s "${EXT}.tcz.md5.txt"
-
-          test -s "${EXT}.tcz.sha256"
-
-          test -s "${EXT}.manifest.txt"
-
-
-          echo "Checking expected module paths..."
-
-          grep -F \
-            "usr/local/lib/modules/${KVER}/modules.dep" \
-            "${EXT}.manifest.txt"
-
-          grep -F \
-            "usr/local/lib/modules/${KVER}/modules.alias" \
-            "${EXT}.manifest.txt"
-
-          grep -F \
-            "usr/local/lib/modules/${KVER}/kernel/" \
-            "${EXT}.manifest.txt"
-
-
+          set -euo pipefail
+          EXT="N1-KERNEL-${KERNEL_RELEASE}"
+          unsquashfs -ll "${EXT}.tcz" | grep -q "usr/local/lib/modules/${KERNEL_RELEASE}/kernel/"
+          unsquashfs -ll "${EXT}.tcz" | grep -q "usr/local/lib/modules/${KERNEL_RELEASE}/modules.dep"
+          unsquashfs -ll "${EXT}.tcz" | grep -q "usr/local/lib/modules/${KERNEL_RELEASE}/modules.alias"
           echo "TCZ validation passed."
 
-
-      # ------------------------------------------------------------
-      # 9. Create build manifest
-      # ------------------------------------------------------------
-      - name: Create build manifest
+      - name: Generate checksums and manifest
         shell: bash
         env:
-          KVER: ${{ steps.vars.outputs.kver }}
-          SOURCE_RELEASE: ${{ steps.vars.outputs.source_release }}
-          BUNDLE_ASSET: ${{ steps.vars.outputs.bundle_asset }}
+          KERNEL_RELEASE: ${{ steps.vars.outputs.KERNEL_RELEASE }}
         run: |
-          set -Eeuo pipefail
+          set -euo pipefail
+          EXT="N1-KERNEL-${KERNEL_RELEASE}"
+          sha256sum "${EXT}.tcz" > "${EXT}.tcz.sha256"
+          md5sum "${EXT}.tcz" > "${EXT}.tcz.md5"
+          unsquashfs -ll "${EXT}.tcz" > "${EXT}.manifest.txt"
+          cat > "${EXT}.build-info.txt" <<INFO
+Extension: ${EXT}.tcz
+Kernel release: ${KERNEL_RELEASE}
+Source repository: ${SOURCE_REPO}
+Source release: ${{ steps.vars.outputs.SOURCE_RELEASE }}
+Bundle asset: ${{ steps.vars.outputs.BUNDLE_ASSET }}
+Build date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+INFO
+          ls -lh "${EXT}.tcz" "${EXT}.tcz.sha256" "${EXT}.tcz.md5" "${EXT}.manifest.txt" "${EXT}.build-info.txt"
+          cat "${EXT}.tcz.sha256"
 
-          EXT="N1-KERNEL-${KVER}"
-
-          cat > "${EXT}.build-info.txt" <<EOF
-source_repo=${SOURCE_REPO}
-source_release=${SOURCE_RELEASE}
-bundle_asset=${BUNDLE_ASSET}
-kernel_release=${KVER}
-extension=${EXT}.tcz
-module_count=$(find "tcz-root/usr/local/lib/modules/${KVER}/kernel" -type f -name '*.ko*' | wc -l)
-build_date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-runner=${RUNNER_OS}
-EOF
-
-          cat "${EXT}.build-info.txt"
-
-
-      # ------------------------------------------------------------
-      # 10. Upload artifact
-      # ------------------------------------------------------------
-      - name: Upload TCZ artifact
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: N1-KERNEL-${{ steps.vars.outputs.kver }}-tcz
+          name: N1-KERNEL-${{ steps.vars.outputs.KERNEL_RELEASE }}
           path: |
-            N1-KERNEL-${{ steps.vars.outputs.kver }}.tcz
-            N1-KERNEL-${{ steps.vars.outputs.kver }}.tcz.md5.txt
-            N1-KERNEL-${{ steps.vars.outputs.kver }}.tcz.sha256
-            N1-KERNEL-${{ steps.vars.outputs.kver }}.manifest.txt
-            N1-KERNEL-${{ steps.vars.outputs.kver }}.build-info.txt
+            N1-KERNEL-${{ steps.vars.outputs.KERNEL_RELEASE }}.tcz
+            N1-KERNEL-${{ steps.vars.outputs.KERNEL_RELEASE }}.tcz.sha256
+            N1-KERNEL-${{ steps.vars.outputs.KERNEL_RELEASE }}.tcz.md5
+            N1-KERNEL-${{ steps.vars.outputs.KERNEL_RELEASE }}.manifest.txt
+            N1-KERNEL-${{ steps.vars.outputs.KERNEL_RELEASE }}.build-info.txt
           if-no-files-found: error
-          retention-days: 30
