@@ -30,6 +30,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,26 +40,38 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y curl ca-certificates xz-utils gzip file squashfs-tools coreutils findutils
+          sudo apt-get install -y \
+            curl ca-certificates xz-utils gzip file \
+            squashfs-tools coreutils findutils
 
       - name: Resolve variables
         id: vars
         shell: bash
         env:
-          INPUT_SOURCE_RELEASE: ${{ inputs.source_release }}
-          INPUT_BUNDLE_ASSET: ${{ inputs.bundle_asset }}
-          INPUT_KERNEL_RELEASE: ${{ inputs.kernel_release }}
+          INPUT_SOURCE_RELEASE: ${{ github.event.inputs.source_release }}
+          INPUT_BUNDLE_ASSET: ${{ github.event.inputs.bundle_asset }}
+          INPUT_KERNEL_RELEASE: ${{ github.event.inputs.kernel_release }}
         run: |
           set -euo pipefail
           SOURCE_RELEASE="${INPUT_SOURCE_RELEASE:-$DEFAULT_SOURCE_RELEASE}"
           BUNDLE_ASSET="${INPUT_BUNDLE_ASSET:-$DEFAULT_BUNDLE_ASSET}"
           KERNEL_RELEASE="${INPUT_KERNEL_RELEASE:-$DEFAULT_KERNEL_RELEASE}"
-          echo "SOURCE_RELEASE=$SOURCE_RELEASE" >> "$GITHUB_OUTPUT"
-          echo "BUNDLE_ASSET=$BUNDLE_ASSET" >> "$GITHUB_OUTPUT"
-          echo "KERNEL_RELEASE=$KERNEL_RELEASE" >> "$GITHUB_OUTPUT"
+          EXT="N1-KERNEL-${KERNEL_RELEASE}"
+          ARTIFACT_NAME="N1-KERNEL-${KERNEL_RELEASE//./-}"
+
+          {
+            echo "SOURCE_RELEASE=$SOURCE_RELEASE"
+            echo "BUNDLE_ASSET=$BUNDLE_ASSET"
+            echo "KERNEL_RELEASE=$KERNEL_RELEASE"
+            echo "EXT=$EXT"
+            echo "ARTIFACT_NAME=$ARTIFACT_NAME"
+          } >> "$GITHUB_OUTPUT"
+
           echo "SOURCE_RELEASE=$SOURCE_RELEASE"
           echo "BUNDLE_ASSET=$BUNDLE_ASSET"
           echo "KERNEL_RELEASE=$KERNEL_RELEASE"
+          echo "EXT=$EXT"
+          echo "ARTIFACT_NAME=$ARTIFACT_NAME"
 
       - name: Download kernel release bundle
         shell: bash
@@ -88,15 +101,10 @@ jobs:
           KERNEL_RELEASE: ${{ steps.vars.outputs.KERNEL_RELEASE }}
         run: |
           set -euo pipefail
-          MODULE_ARCHIVE=""
-          while IFS= read -r candidate; do
-            if [ "$(basename "$candidate")" = "modules-${KERNEL_RELEASE}.tar.gz" ]; then
-              MODULE_ARCHIVE="$candidate"
-              break
-            fi
-          done < <(find source-release -type f -name "modules-${KERNEL_RELEASE}.tar.gz" -print)
+          MODULE_ARCHIVE="$(find source-release -type f -name "modules-${KERNEL_RELEASE}.tar.gz" -print -quit)"
           if [ -z "$MODULE_ARCHIVE" ]; then
-            echo "ERROR: modules archive not found"
+            echo "ERROR: modules archive not found for ${KERNEL_RELEASE}"
+            echo "Available module archives:"
             find source-release -type f -name 'modules-*.tar.gz' -print | sort
             exit 1
           fi
@@ -145,11 +153,11 @@ jobs:
         shell: bash
         env:
           KERNEL_RELEASE: ${{ steps.vars.outputs.KERNEL_RELEASE }}
+          EXT: ${{ steps.vars.outputs.EXT }}
         run: |
           set -euxo pipefail
-          EXT="N1-KERNEL-${KERNEL_RELEASE}"
           DST="tcz-root/usr/local/lib/modules/${KERNEL_RELEASE}"
-          rm -rf tcz-root "$EXT.tcz" "$EXT.tcz.md5"
+          rm -rf tcz-root "${EXT}.tcz" "${EXT}.tcz.md5"
           mkdir -p "$DST"
           cp -a modules-tree/kernel "$DST/"
           cp -a modules-tree/modules.* "$DST/"
@@ -159,10 +167,9 @@ jobs:
       - name: Build TCZ
         shell: bash
         env:
-          KERNEL_RELEASE: ${{ steps.vars.outputs.KERNEL_RELEASE }}
+          EXT: ${{ steps.vars.outputs.EXT }}
         run: |
           set -euxo pipefail
-          EXT="N1-KERNEL-${KERNEL_RELEASE}"
           mksquashfs tcz-root "${EXT}.tcz" -noappend -no-xattrs -comp xz -b 131072
           ls -lh "${EXT}.tcz"
           file "${EXT}.tcz"
@@ -170,44 +177,49 @@ jobs:
       - name: Validate TCZ
         shell: bash
         env:
+          EXT: ${{ steps.vars.outputs.EXT }}
           KERNEL_RELEASE: ${{ steps.vars.outputs.KERNEL_RELEASE }}
         run: |
           set -euo pipefail
-          EXT="N1-KERNEL-${KERNEL_RELEASE}"
-          unsquashfs -ll "${EXT}.tcz" | grep -q "usr/local/lib/modules/${KERNEL_RELEASE}/kernel/"
-          unsquashfs -ll "${EXT}.tcz" | grep -q "usr/local/lib/modules/${KERNEL_RELEASE}/modules.dep"
-          unsquashfs -ll "${EXT}.tcz" | grep -q "usr/local/lib/modules/${KERNEL_RELEASE}/modules.alias"
+          unsquashfs -ll "${EXT}.tcz" > tcz-list.txt
+          grep -q "usr/local/lib/modules/${KERNEL_RELEASE}/kernel/" tcz-list.txt
+          grep -q "usr/local/lib/modules/${KERNEL_RELEASE}/modules.dep" tcz-list.txt
+          grep -q "usr/local/lib/modules/${KERNEL_RELEASE}/modules.alias" tcz-list.txt
           echo "TCZ validation passed."
 
       - name: Generate checksums and manifest
         shell: bash
         env:
+          EXT: ${{ steps.vars.outputs.EXT }}
           KERNEL_RELEASE: ${{ steps.vars.outputs.KERNEL_RELEASE }}
+          SOURCE_RELEASE: ${{ steps.vars.outputs.SOURCE_RELEASE }}
+          BUNDLE_ASSET: ${{ steps.vars.outputs.BUNDLE_ASSET }}
         run: |
           set -euo pipefail
-          EXT="N1-KERNEL-${KERNEL_RELEASE}"
           sha256sum "${EXT}.tcz" > "${EXT}.tcz.sha256"
           md5sum "${EXT}.tcz" > "${EXT}.tcz.md5"
           unsquashfs -ll "${EXT}.tcz" > "${EXT}.manifest.txt"
-          cat > "${EXT}.build-info.txt" <<INFO
-Extension: ${EXT}.tcz
-Kernel release: ${KERNEL_RELEASE}
-Source repository: ${SOURCE_REPO}
-Source release: ${{ steps.vars.outputs.SOURCE_RELEASE }}
-Bundle asset: ${{ steps.vars.outputs.BUNDLE_ASSET }}
-Build date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-INFO
+
+          {
+            echo "Extension: ${EXT}.tcz"
+            echo "Kernel release: ${KERNEL_RELEASE}"
+            echo "Source repository: ${SOURCE_REPO}"
+            echo "Source release: ${SOURCE_RELEASE}"
+            echo "Bundle asset: ${BUNDLE_ASSET}"
+            echo "Build date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          } > "${EXT}.build-info.txt"
+
           ls -lh "${EXT}.tcz" "${EXT}.tcz.sha256" "${EXT}.tcz.md5" "${EXT}.manifest.txt" "${EXT}.build-info.txt"
           cat "${EXT}.tcz.sha256"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: N1-KERNEL-${{ steps.vars.outputs.KERNEL_RELEASE }}
+          name: ${{ steps.vars.outputs.ARTIFACT_NAME }}
           path: |
-            N1-KERNEL-${{ steps.vars.outputs.KERNEL_RELEASE }}.tcz
-            N1-KERNEL-${{ steps.vars.outputs.KERNEL_RELEASE }}.tcz.sha256
-            N1-KERNEL-${{ steps.vars.outputs.KERNEL_RELEASE }}.tcz.md5
-            N1-KERNEL-${{ steps.vars.outputs.KERNEL_RELEASE }}.manifest.txt
-            N1-KERNEL-${{ steps.vars.outputs.KERNEL_RELEASE }}.build-info.txt
+            ${{ steps.vars.outputs.EXT }}.tcz
+            ${{ steps.vars.outputs.EXT }}.tcz.sha256
+            ${{ steps.vars.outputs.EXT }}.tcz.md5
+            ${{ steps.vars.outputs.EXT }}.manifest.txt
+            ${{ steps.vars.outputs.EXT }}.build-info.txt
           if-no-files-found: error
