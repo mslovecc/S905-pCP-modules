@@ -1,0 +1,138 @@
+name: Build N1 pCP Kernel Module Extension
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_release:
+        description: "S905-pCP-kernels release tag"
+        required: true
+        default: "v0.4.2"
+      bundle_asset:
+        description: "Release bundle"
+        required: true
+        default: "6.12.67.tar.gz"
+      kernel_release:
+        description: "Kernel release"
+        required: true
+        default: "6.12.112-pcp-n1"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPO: mslovecc/S905-pCP-kernels
+  SOURCE_RELEASE: v0.4.2
+  BUNDLE_ASSET: 6.12.67.tar.gz
+  KERNEL_RELEASE: 6.12.112-pcp-n1
+
+jobs:
+  build-tcz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve inputs
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE="${{ github.event.inputs.source_release }}"
+          ASSET="${{ github.event.inputs.bundle_asset }}"
+          KVER="${{ github.event.inputs.kernel_release }}"
+          [ -n "$RELEASE" ] || RELEASE="$SOURCE_RELEASE"
+          [ -n "$ASSET" ] || ASSET="$BUNDLE_ASSET"
+          [ -n "$KVER" ] || KVER="$KERNEL_RELEASE"
+          echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          echo "kver=$KVER" >> "$GITHUB_OUTPUT"
+
+      - name: Install tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y squashfs-tools xz-utils gzip tar file
+
+      - name: Download S905-pCP-kernels release
+        shell: bash
+        env:
+          RELEASE: ${{ steps.vars.outputs.release }}
+          ASSET: ${{ steps.vars.outputs.asset }}
+        run: |
+          set -euo pipefail
+          URL="https://github.com/${SOURCE_REPO}/releases/download/${RELEASE}/${ASSET}"
+          echo "$URL"
+          curl -fL --retry 5 --retry-delay 2 -o source-bundle.tar.gz "$URL"
+          file source-bundle.tar.gz
+          sha256sum source-bundle.tar.gz
+
+      - name: Extract matching module tree
+        shell: bash
+        env:
+          KVER: ${{ steps.vars.outputs.kver }}
+        run: |
+          set -euo pipefail
+          rm -rf source-release modules-tree
+          mkdir source-release modules-tree
+          tar -xzf source-bundle.tar.gz -C source-release
+
+          MODULE_TAR="source-release/modules-${KVER}.tar.gz"
+          test -f "$MODULE_TAR" || {
+            echo "::error::Missing $MODULE_TAR"
+            find source-release -type f -name 'modules-*.tar.gz' -print
+            exit 1
+          }
+
+          tar -xzf "$MODULE_TAR" -C modules-tree
+
+          KO_COUNT="$(find modules-tree -type f -name '*.ko*' | wc -l)"
+          echo "KO_COUNT=$KO_COUNT"
+          test "$KO_COUNT" -ge 100
+
+      - name: Build TCZ filesystem
+        shell: bash
+        env:
+          KVER: ${{ steps.vars.outputs.kver }}
+        run: |
+          set -euo pipefail
+          EXT="N1-KERNEL-${KVER}"
+          rm -rf tcz-root
+          mkdir -p "tcz-root/usr/local/lib/modules/${KVER}"
+          cp -a modules-tree/. "tcz-root/usr/local/lib/modules/${KVER}/"
+
+          test -f "tcz-root/usr/local/lib/modules/${KVER}/modules.dep"
+          test -f "tcz-root/usr/local/lib/modules/${KVER}/modules.alias"
+          test -d "tcz-root/usr/local/lib/modules/${KVER}/kernel"
+
+          mksquashfs tcz-root "${EXT}.tcz" \
+            -noappend -no-xattrs -no-exports \
+            -comp xz -b 131072 -no-progress
+
+          md5sum "${EXT}.tcz" > "${EXT}.tcz.md5.txt"
+          sha256sum "${EXT}.tcz" > "${EXT}.tcz.sha256"
+          unsquashfs -ll "${EXT}.tcz" > "${EXT}.manifest.txt"
+
+      - name: Validate TCZ
+        shell: bash
+        env:
+          KVER: ${{ steps.vars.outputs.kver }}
+        run: |
+          set -euo pipefail
+          EXT="N1-KERNEL-${KVER}"
+          grep -F "usr/local/lib/modules/${KVER}/modules.dep" "${EXT}.manifest.txt"
+          grep -F "usr/local/lib/modules/${KVER}/modules.alias" "${EXT}.manifest.txt"
+          grep -F "usr/local/lib/modules/${KVER}/kernel/" "${EXT}.manifest.txt"
+          echo "TCZ validation passed."
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: N1-KERNEL-${{ steps.vars.outputs.kver }}
+          path: |
+            N1-KERNEL-${{ steps.vars.outputs.kver }}.tcz
+            N1-KERNEL-${{ steps.vars.outputs.kver }}.tcz.md5.txt
+            N1-KERNEL-${{ steps.vars.outputs.kver }}.tcz.sha256
+            N1-KERNEL-${{ steps.vars.outputs.kver }}.manifest.txt
+          retention-days: 30
