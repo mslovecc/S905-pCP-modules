@@ -107,6 +107,12 @@ jobs:
         run: |
           set -euo pipefail
           EXT="N1-KERNEL-${KVER}"
+
+          echo "== squashfs-tools =="
+          mksquashfs -version || true
+          unsquashfs -version || true
+
+          echo "== module tree =="
           rm -rf tcz-root
           mkdir -p "tcz-root/usr/local/lib/modules/${KVER}"
           cp -a modules-tree/. "tcz-root/usr/local/lib/modules/${KVER}/"
@@ -115,13 +121,30 @@ jobs:
           test -f "tcz-root/usr/local/lib/modules/${KVER}/modules.alias"
           test -d "tcz-root/usr/local/lib/modules/${KVER}/kernel"
 
-          mksquashfs tcz-root "${EXT}.tcz" \
-            -noappend -no-xattrs -no-exports \
-            -comp xz -b 131072 -no-progress
+          echo "Module files:"
+          find "tcz-root/usr/local/lib/modules/${KVER}/kernel" -type f -name '*.ko*' | wc -l
 
+          echo "Root filesystem size:"
+          du -sh tcz-root
+          echo "Free space:"
+          df -h .
+
+          echo "== mksquashfs =="
+          # Keep the command deliberately conservative for Ubuntu's
+          # squashfs-tools package.  xz is required by pCP/Tiny Core.
+          mksquashfs tcz-root "${EXT}.tcz"             -noappend             -no-xattrs             -comp xz             -b 131072
+
+          test -s "${EXT}.tcz"
+
+          echo "== checksums =="
           md5sum "${EXT}.tcz" > "${EXT}.tcz.md5.txt"
           sha256sum "${EXT}.tcz" > "${EXT}.tcz.sha256"
+
+          echo "== manifest =="
           unsquashfs -ll "${EXT}.tcz" > "${EXT}.manifest.txt"
+          test -s "${EXT}.manifest.txt"
+
+          ls -lh "${EXT}.tcz" "${EXT}.tcz.md5.txt"             "${EXT}.tcz.sha256" "${EXT}.manifest.txt"
 
       - name: Validate TCZ
         shell: bash
@@ -130,6 +153,7 @@ jobs:
         run: |
           set -euo pipefail
           EXT="N1-KERNEL-${KVER}"
+          test -s "${EXT}.tcz"
           grep -F "usr/local/lib/modules/${KVER}/modules.dep" "${EXT}.manifest.txt"
           grep -F "usr/local/lib/modules/${KVER}/modules.alias" "${EXT}.manifest.txt"
           grep -F "usr/local/lib/modules/${KVER}/kernel/" "${EXT}.manifest.txt"
