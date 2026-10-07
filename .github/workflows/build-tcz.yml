@@ -1,4 +1,3 @@
-```yaml
 name: Build N1 Kernel TCZ
 
 on:
@@ -614,4 +613,3 @@ EOF
             N1-KERNEL-${{ steps.vars.outputs.kver }}.build-info.txt
           if-no-files-found: error
           retention-days: 30
-```
