@@ -78,12 +78,21 @@ jobs:
           mkdir source-release modules-tree
           tar -xzf source-bundle.tar.gz -C source-release
 
-          MODULE_TAR="source-release/modules-${KVER}.tar.gz"
-          test -f "$MODULE_TAR" || {
-            echo "::error::Missing $MODULE_TAR"
-            find source-release -type f -name 'modules-*.tar.gz' -print
+          # The release bundle may contain an extra directory layer
+          # (for example: source-release/6.12.67/modules-<KVER>.tar.gz).
+          mapfile -t MODULE_MATCHES < <(
+            find source-release -type f -name "modules-${KVER}.tar.gz" -print
+          )
+
+          if [ "${#MODULE_MATCHES[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one modules-${KVER}.tar.gz, found ${#MODULE_MATCHES[@]}"
+            echo "Available module archives:"
+            find source-release -type f -name 'modules-*.tar.gz' -print | sort
             exit 1
-          }
+          fi
+
+          MODULE_TAR="${MODULE_MATCHES[0]}"
+          echo "Using module archive: ${MODULE_TAR}"
 
           tar -xzf "$MODULE_TAR" -C modules-tree
 

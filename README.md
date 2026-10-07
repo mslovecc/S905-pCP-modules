@@ -21,3 +21,9 @@ Output:
 
 The Raspberry Pi `modules-6.12.67-pcpCore-v8.gz` archive is deliberately
 not used.
+
+## v2 fix
+
+The workflow recursively locates `modules-<kernel>.tar.gz` after extracting the
+release bundle. This handles bundles that contain an additional directory layer,
+such as `6.12.67/modules-6.12.112-pcp-n1.tar.gz`.
