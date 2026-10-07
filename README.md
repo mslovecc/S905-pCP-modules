@@ -34,3 +34,10 @@ The TCZ build step now prints squashfs-tools versions, module count, filesystem
 size, and free space. It uses a conservative `mksquashfs` invocation and
 separates archive creation, checksum generation, and manifest validation so the
 actual failing command is visible in Actions logs.
+
+## v4 diagnostic build
+
+The TCZ build step is now split into explicit checkpoints. It avoids a
+`find | wc -l` pipeline under `pipefail` and prints a checkpoint after every
+filesystem operation, making failures in copy, module indexes, or SquashFS
+creation directly visible in GitHub Actions.

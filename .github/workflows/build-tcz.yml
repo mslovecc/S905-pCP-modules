@@ -105,34 +105,84 @@ jobs:
         env:
           KVER: ${{ steps.vars.outputs.kver }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+
           EXT="N1-KERNEL-${KVER}"
+          SRC="modules-tree"
+          DST="tcz-root/usr/local/lib/modules/${KVER}"
 
-          echo "== squashfs-tools =="
-          mksquashfs -version || true
-          unsquashfs -version || true
+          echo "== environment =="
+          pwd
+          df -h .
+          du -sh "${SRC}" || true
+          echo "Source top-level:"
+          ls -lah "${SRC}"
 
-          echo "== module tree =="
+          echo "== prepare destination =="
           rm -rf tcz-root
-          mkdir -p "tcz-root/usr/local/lib/modules/${KVER}"
-          cp -a modules-tree/. "tcz-root/usr/local/lib/modules/${KVER}/"
+          echo "rm OK"
 
-          test -f "tcz-root/usr/local/lib/modules/${KVER}/modules.dep"
-          test -f "tcz-root/usr/local/lib/modules/${KVER}/modules.alias"
-          test -d "tcz-root/usr/local/lib/modules/${KVER}/kernel"
+          mkdir -p "${DST}"
+          echo "mkdir OK: ${DST}"
 
-          echo "Module files:"
-          find "tcz-root/usr/local/lib/modules/${KVER}/kernel" -type f -name '*.ko*' | wc -l
+          echo "== source checks =="
+          test -d "${SRC}"
+          test -d "${SRC}/kernel"
+          test -f "${SRC}/modules.dep"
+          test -f "${SRC}/modules.alias"
+          echo "source checks OK"
 
-          echo "Root filesystem size:"
+          echo "== copy kernel directory =="
+          cp -a "${SRC}/kernel" "${DST}/"
+          echo "kernel copy OK"
+          du -sh "${DST}/kernel" || true
+
+          echo "== copy module indexes =="
+          for f in \
+            modules.alias \
+            modules.alias.bin \
+            modules.builtin \
+            modules.builtin.alias.bin \
+            modules.builtin.bin \
+            modules.builtin.modinfo \
+            modules.dep \
+            modules.dep.bin \
+            modules.devname \
+            modules.order \
+            modules.softdep \
+            modules.symbols \
+            modules.symbols.bin \
+            modules.weakdep
+          do
+            test -f "${SRC}/${f}"
+            cp -a "${SRC}/${f}" "${DST}/"
+            echo "copied ${f}"
+          done
+
+          echo "== destination checks =="
+          test -d "${DST}/kernel"
+          test -f "${DST}/modules.dep"
+          test -f "${DST}/modules.alias"
+          echo "destination checks OK"
+
+          echo "== module count =="
+          KO_COUNT=0
+          while IFS= read -r -d '' f; do
+            KO_COUNT=$((KO_COUNT + 1))
+          done < <(find "${DST}/kernel" -type f -name '*.ko*' -print0)
+          echo "KO_COUNT=${KO_COUNT}"
+          test "${KO_COUNT}" -ge 100
+
+          echo "== TCZ root size =="
           du -sh tcz-root
-          echo "Free space:"
           df -h .
 
           echo "== mksquashfs =="
-          # Keep the command deliberately conservative for Ubuntu's
-          # squashfs-tools package.  xz is required by pCP/Tiny Core.
-          mksquashfs tcz-root "${EXT}.tcz"             -noappend             -no-xattrs             -comp xz             -b 131072
+          mksquashfs tcz-root "${EXT}.tcz" \
+            -noappend \
+            -no-xattrs \
+            -comp xz \
+            -b 131072
 
           test -s "${EXT}.tcz"
 
@@ -144,7 +194,11 @@ jobs:
           unsquashfs -ll "${EXT}.tcz" > "${EXT}.manifest.txt"
           test -s "${EXT}.manifest.txt"
 
-          ls -lh "${EXT}.tcz" "${EXT}.tcz.md5.txt"             "${EXT}.tcz.sha256" "${EXT}.manifest.txt"
+          echo "== final files =="
+          ls -lh "${EXT}.tcz" \
+            "${EXT}.tcz.md5.txt" \
+            "${EXT}.tcz.sha256" \
+            "${EXT}.manifest.txt"
 
       - name: Validate TCZ
         shell: bash
